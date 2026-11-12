@@ -152,49 +152,151 @@ fn disconnect_github(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn list_repositories(owner: String, state: State<'_, AppState>) -> Result<Vec<Repo>, String> {
-    if !valid_segment(&owner) { return Err("Invalid GitHub owner or organization".into()); }
+#[derive(Debug, Serialize)]
+struct Workspace {
+    login: String,
+    avatar_url: Option<String>,
+    kind: String,
+}
+
+// The authenticated endpoint lists repositories the token can access across the
+// personal account, collaborator projects and organization memberships.
+// The token determines which private repos are visible; GitFlow cannot widen it.
+async fn list_accessible_repositories(state: &AppState) -> Result<Vec<Repo>, String> {
     let mut repos = Vec::new();
-    // Authenticated organization listing also reveals private repositories that the token may access.
-    for page in 1..=30 {
-        let path = format!("/orgs/{owner}/repos?type=all&per_page=100&page={page}&sort=updated&direction=desc");
-        let response = request(&state, Method::GET, &path, None, false).await;
-        let page_data = match response {
-            Ok(r) => r.json::<Vec<Repo>>().await.map_err(|e| format!("Invalid repository response: {e}"))?,
-            Err(e) if page == 1 && (e.contains("404") || e.contains("Not Found")) => {
-                // Personal account: use /users/{owner}/repos (public), or /user/repos with an authenticated token.
-                return list_personal_repositories(&state, &owner).await;
-            }
-            Err(e) => return Err(e),
-        };
+    for page in 1..=100 {
+        let path = format!(
+            "/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&page={page}&sort=updated&direction=desc"
+        );
+        let page_data = request(state, Method::GET, &path, None, true)
+            .await?
+            .json::<Vec<Repo>>()
+            .await
+            .map_err(|e| format!("Invalid GitHub repositories response: {e}"))?;
         let count = page_data.len();
         repos.extend(page_data);
-        if count < 100 { break; }
+        if count < 100 {
+            break;
+        }
     }
+    let mut seen = std::collections::HashSet::new();
+    repos.retain(|repo| seen.insert(repo.id));
+    repos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(repos)
 }
 
-async fn list_personal_repositories(state: &AppState, owner: &str) -> Result<Vec<Repo>, String> {
-    let me = if stored_token(state)?.is_some() {
-        let info = get_json(state, "/user", true).await?;
-        info.get("login").and_then(Value::as_str).map(str::to_owned)
-    } else { None };
-    let mine = me.as_deref().map(|x| x.eq_ignore_ascii_case(owner)).unwrap_or(false);
+async fn list_public_owner_repositories(state: &AppState, owner: &str) -> Result<Vec<Repo>, String> {
     let mut repos = Vec::new();
-    for page in 1..=30 {
-        let path = if mine {
-            format!("/user/repos?affiliation=owner&visibility=all&per_page=100&page={page}&sort=updated&direction=desc")
-        } else {
-            format!("/users/{owner}/repos?type=owner&per_page=100&page={page}&sort=updated&direction=desc")
-        };
-        let response = request(state, Method::GET, &path, None, false).await?;
-        let page_data = response.json::<Vec<Repo>>().await.map_err(|e| e.to_string())?;
-        let count = page_data.len();
-        repos.extend(page_data.into_iter().filter(|r| r.owner.login.eq_ignore_ascii_case(owner)));
-        if count < 100 { break; }
+    // Try an organization, then fall back to a personal public account.
+    let org_path = format!("/orgs/{owner}/repos?type=all&per_page=100&page=1");
+    let org_exists = match request(state, Method::GET, &org_path, None, false).await {
+        Ok(response) => {
+            let first = response.json::<Vec<Repo>>().await.map_err(|e| e.to_string())?;
+            repos.extend(first);
+            true
+        }
+        Err(err) if err.contains("404") => false,
+        Err(err) => return Err(err),
+    };
+    if org_exists {
+        if repos.len() < 100 {
+            return Ok(repos);
+        }
+        for page in 2..=100 {
+            let path = format!("/orgs/{owner}/repos?type=all&per_page=100&page={page}");
+            let page_data = request(state, Method::GET, &path, None, false)
+                .await?
+                .json::<Vec<Repo>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            let count = page_data.len();
+            repos.extend(page_data);
+            if count < 100 {
+                break;
+            }
+        }
+    } else {
+        for page in 1..=100 {
+            let path = format!("/users/{owner}/repos?type=owner&per_page=100&page={page}");
+            let page_data = request(state, Method::GET, &path, None, false)
+                .await?
+                .json::<Vec<Repo>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            let count = page_data.len();
+            repos.extend(page_data);
+            if count < 100 {
+                break;
+            }
+        }
     }
+    repos.retain(|repo| repo.owner.login.eq_ignore_ascii_case(owner));
+    repos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(repos)
+}
+
+#[tauri::command]
+async fn list_repositories(owner: String, state: State<'_, AppState>) -> Result<Vec<Repo>, String> {
+    if owner.eq_ignore_ascii_case("all") {
+        return list_accessible_repositories(&state).await;
+    }
+    if !valid_segment(&owner) {
+        return Err("Invalid GitHub owner or organization".into());
+    }
+    if stored_token(&state)?.is_some() {
+        let repos = list_accessible_repositories(&state).await?;
+        let scoped: Vec<Repo> = repos
+            .into_iter()
+            .filter(|repo| repo.owner.login.eq_ignore_ascii_case(&owner))
+            .collect();
+        if !scoped.is_empty() {
+            return Ok(scoped);
+        }
+    }
+    list_public_owner_repositories(&state, &owner).await
+}
+
+#[tauri::command]
+async fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String> {
+    let user = get_json(&state, "/user", true).await?;
+    let me: GitHubUser = serde_json::from_value(user)
+        .map_err(|e| format!("Cannot read authenticated GitHub user: {e}"))?;
+    let mut workspaces = vec![Workspace {
+        login: me.login.clone(),
+        avatar_url: me.avatar_url,
+        kind: "personal".to_string(),
+    }];
+    let mut seen = std::collections::HashSet::from([me.login.to_lowercase()]);
+
+    // Some fine-grained tokens cannot list organization memberships. Owners
+    // of accessible repositories are added below even if this call is denied.
+    if let Ok(orgs) = get_json(&state, "/user/orgs?per_page=100", true).await {
+        if let Some(items) = orgs.as_array() {
+            for item in items {
+                if let Some(login) = item.get("login").and_then(Value::as_str) {
+                    if seen.insert(login.to_lowercase()) {
+                        workspaces.push(Workspace {
+                            login: login.to_owned(),
+                            avatar_url: item.get("avatar_url").and_then(Value::as_str).map(str::to_owned),
+                            kind: "organization".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for repo in list_accessible_repositories(&state).await? {
+        if seen.insert(repo.owner.login.to_lowercase()) {
+            workspaces.push(Workspace {
+                login: repo.owner.login,
+                avatar_url: repo.owner.avatar_url,
+                kind: "repository owner".to_string(),
+            });
+        }
+    }
+    workspaces[1..].sort_by(|a, b| a.login.to_lowercase().cmp(&b.login.to_lowercase()));
+    Ok(workspaces)
 }
 
 #[tauri::command]
@@ -282,7 +384,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { client, token: Mutex::new(None) })
         .invoke_handler(tauri::generate_handler![
-            connect_github, disconnect_github, list_repositories,
+            connect_github, disconnect_github, list_repositories, list_workspaces,
             create_repository, update_repository, delete_repository, repository_details,
         ])
         .run(tauri::generate_context!())
