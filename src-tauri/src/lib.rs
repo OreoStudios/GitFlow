@@ -235,10 +235,61 @@ async fn list_public_owner_repositories(state: &AppState, owner: &str) -> Result
     Ok(repos)
 }
 
+// Combine token-authorized repositories with public personal/organization
+// repositories. A fine-grained PAT can be scoped to one resource owner;
+// public projects should still be discoverable across the user's other owners.
+async fn list_all_repositories(state: &AppState) -> Result<Vec<Repo>, String> {
+    let mut repos = list_accessible_repositories(state).await?;
+    let user = get_json(state, "/user", true).await?;
+    let login = user.get("login").and_then(Value::as_str)
+        .ok_or("GitHub response did not include the authenticated login")?;
+
+    if let Ok(public_repos) = list_public_owner_repositories(state, login).await {
+        repos.extend(public_repos);
+    }
+
+    let mut orgs = std::collections::HashSet::new();
+    for path in [
+        format!("/users/{login}/orgs?per_page=100"),
+        "/user/orgs?per_page=100".to_owned(),
+    ] {
+        if let Ok(data) = get_json(state, &path, false).await {
+            if let Some(items) = data.as_array() {
+                for item in items {
+                    if let Some(org) = item.get("login").and_then(Value::as_str) {
+                        if valid_segment(org) {
+                            orgs.insert(org.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Repositories already returned by /user/repos are available regardless
+    // of whether organization membership can be listed with this token.
+    for repo in &repos {
+        if !repo.owner.login.eq_ignore_ascii_case(login) {
+            orgs.insert(repo.owner.login.clone());
+        }
+    }
+    // Fetch public org projects even if the fine-grained token excludes
+    // them, while keeping refresh bounded for users in many organizations.
+    for org in orgs.into_iter().take(30) {
+        if let Ok(public_repos) = list_public_owner_repositories(state, &org).await {
+            repos.extend(public_repos);
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    repos.retain(|repo| seen.insert(repo.id));
+    repos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(repos)
+}
+
 #[tauri::command]
 async fn list_repositories(owner: String, state: State<'_, AppState>) -> Result<Vec<Repo>, String> {
     if owner.eq_ignore_ascii_case("all") {
-        return list_accessible_repositories(&state).await;
+        return list_all_repositories(&state).await;
     }
     if !valid_segment(&owner) {
         return Err("Invalid GitHub owner or organization".into());
@@ -286,6 +337,24 @@ async fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, S
         }
     }
 
+    // Public organization memberships remain discoverable even with a
+    // fine-grained token restricted to another resource owner.
+    let public_orgs_path = format!("/users/{}/orgs?per_page=100", me.login);
+    if let Ok(data) = get_json(&state, &public_orgs_path, false).await {
+        if let Some(items) = data.as_array() {
+            for item in items {
+                if let Some(login) = item.get("login").and_then(Value::as_str) {
+                    if seen.insert(login.to_lowercase()) {
+                        workspaces.push(Workspace {
+                            login: login.to_owned(),
+                            avatar_url: item.get("avatar_url").and_then(Value::as_str).map(str::to_owned),
+                            kind: "organization".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
     for repo in list_accessible_repositories(&state).await? {
         if seen.insert(repo.owner.login.to_lowercase()) {
             workspaces.push(Workspace {
