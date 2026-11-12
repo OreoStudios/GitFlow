@@ -274,7 +274,9 @@ async fn list_all_repositories(state: &AppState) -> Result<Vec<Repo>, String> {
     }
     // Fetch public org projects even if the fine-grained token excludes
     // them, while keeping refresh bounded for users in many organizations.
-    for org in orgs.into_iter().take(30) {
+    let mut org_names: Vec<String> = orgs.into_iter().collect();
+    org_names.sort_unstable();
+    for org in org_names.into_iter().take(30) {
         if let Ok(public_repos) = list_public_owner_repositories(state, &org).await {
             repos.extend(public_repos);
         }
