@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Activity, Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, BarChart3,
@@ -162,16 +162,22 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const connected = !!user && isDesktop;
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     setLoading(true); setError("");
     try {
       const result = await github.list(owner);
+      if (sequence !== refreshSequence.current) return;
       setRepos(result);
       setSelected(prev => prev.filter(id => result.some(r => r.id === id)));
     } catch (e) {
+      if (sequence !== refreshSequence.current) return;
       setError(errorMessage(e)); setRepos([]);
-    } finally { setLoading(false); }
+    } finally {
+      if (sequence === refreshSequence.current) setLoading(false);
+    }
   }, [owner, connected]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -418,7 +424,7 @@ export default function App() {
     <AnimatePresence>{paletteOpen && <ModalFrame title="Command palette" eyebrow="GO ANYWHERE, INSTANTLY" onClose={() => setPaletteOpen(false)}><div className="palette-items">{nav.flatMap(n => n.items).map(item => <button key={item.id} onClick={() => { setView(item.id); setPaletteOpen(false); }}><item.icon size={17}/>{item.label}<ArrowUpRight size={14}/></button>)}<button onClick={() => { setPaletteOpen(false); begin("create"); }}><Plus size={17}/>Create repository<ArrowUpRight size={14}/></button><button onClick={() => { setPaletteOpen(false); begin("connect"); }}><KeyRound size={17}/>Connect GitHub<ArrowUpRight size={14}/></button></div><p className="modal-hint"><kbd>Ctrl K</kbd> to toggle · <kbd>Esc</kbd> to close</p></ModalFrame>}</AnimatePresence>
 
     <AnimatePresence>{modal && <ModalFrame title={modal === "connect" ? "Connect to GitHub" : modal === "create" ? "Create a repository" : modal === "edit" ? "Edit repository" : modal === "archive" ? (selectedRepo?.archived ? "Unarchive repository" : "Archive repository") : modal === "visibility" ? "Change visibility" : modal === "bulkDelete" ? "Delete selected repositories" : "Delete repository"} eyebrow={modal === "delete" || modal === "bulkDelete" ? "DANGER ZONE" : "GITFLOW WORKSPACE"} onClose={resetModal}>
-      {modal === "connect" && <div className="modal-body"><div className="modal-feature-icon"><KeyRound size={25}/></div><p>Use a GitHub personal access token to connect. Your token stays only in the Rust process memory until GitFlow closes.</p><label className="field-label">PERSONAL ACCESS TOKEN</label><input className="field" type="password" autoComplete="off" placeholder="github_pat_... or ghp_..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => { if (e.key === "Enter") void connect(); }}/><div className="permission-note"><ShieldCheck size={17}/><span>For deletion, a fine-grained token needs repository <b>Administration: Read and write</b>. Restrict access to only the repositories you intend to manage.</span></div><button className="subtle-link" onClick={() => void visit("https://github.com/settings/personal-access-tokens/new")}>Create a fine-grained token <ExternalLink size={14}/></button><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || token.length < 10} onClick={() => void connect()}>{busy ? "Connecting..." : "Connect GitHub"}<ArrowRight size={15}/></button></div></div>}
+      {modal === "connect" && <div className="modal-body"><div className="modal-feature-icon"><KeyRound size={25}/></div><p>Use a GitHub personal access token to connect. Your token stays only in the Rust process memory until GitFlow closes.</p><label className="field-label">PERSONAL ACCESS TOKEN</label><input className="field" type="password" autoComplete="off" placeholder="github_pat_... or ghp_..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => { if (e.key === "Enter") void connect(); }}/><div className="permission-note"><ShieldCheck size={17}/><span>For deletion, a token needs repository <b>Administration: Read and write</b>. Fine-grained tokens are limited to one resource owner, so private repositories in other organizations need separate authorization.</span></div><button className="subtle-link" onClick={() => void visit("https://github.com/settings/personal-access-tokens/new")}>Create a fine-grained token <ExternalLink size={14}/></button><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || token.length < 10} onClick={() => void connect()}>{busy ? "Connecting..." : "Connect GitHub"}<ArrowRight size={15}/></button></div></div>}
       {modal === "create" && <div className="modal-body"><p>Start your next project without leaving GitFlow. Choose which GitHub account should own the repository.</p>
         <label className="field-label">OWNER</label>
         <select className="field" aria-label="Create repository under" value={createOwner} onChange={e => setCreateOwner(e.target.value)}>
