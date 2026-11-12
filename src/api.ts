@@ -23,6 +23,12 @@ export interface Repo {
   permissions?: { admin?: boolean; push?: boolean; pull?: boolean } | null;
 }
 
+export interface Workspace {
+  login: string;
+  avatar_url: string | null;
+  kind: string;
+}
+
 export interface GitHubUser {
   login: string;
   name: string | null;
@@ -74,7 +80,12 @@ function desktopOnly() {
 export const github = {
   connect: (token: string) => { desktopOnly(); return invoke<GitHubUser>("connect_github", { token }); },
   disconnect: () => { desktopOnly(); return invoke<void>("disconnect_github"); },
-  list: (owner: string) => isDesktop ? invoke<Repo[]>("list_repositories", { owner }) : Promise.resolve(demoRepos.filter(r => r.owner.login.toLowerCase() === owner.toLowerCase())),
+  workspaces: () => isDesktop
+    ? invoke<Workspace[]>("list_workspaces")
+    : Promise.resolve<Workspace[]>([{ login: "OreoStudios", avatar_url: null, kind: "organization" }]),
+  list: (owner: string) => isDesktop
+    ? invoke<Repo[]>("list_repositories", { owner })
+    : Promise.resolve(owner === "all" ? demoRepos : demoRepos.filter(r => r.owner.login.toLowerCase() === owner.toLowerCase())),
   create: (input: { owner: string; name: string; description: string; is_private: boolean }) => {
     desktopOnly();
     return invoke<Repo>("create_repository", { ...input, isPrivate: input.is_private });

@@ -13,3 +13,9 @@
 @media (max-width:1100px){.sidebar{width:205px}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-grid{grid-template-columns:1fr}.content{padding-left:22px;padding-right:22px}.topbar{padding:0 22px}.hero-art{opacity:.45}.command-trigger{width:175px}}
 @media (max-width:770px){.sidebar{width:68px}.sidebar-brand{justify-content:center;padding:0}.sidebar-brand>div:last-child,.workspace-chip,.nav-section-label,.nav-link span,.nav-link small,.sidebar-upgrade,.sidebar-footer,.nav-link i{display:none}.nav-link{justify-content:center;padding:0}.nav-link svg{width:20px;height:20px}.sidebar-scroll{padding:0 9px}.nav-group{margin-top:13px}.topbar{height:66px}.topbar-menu{display:block}.command-trigger{width:38px;justify-content:center}.command-trigger span,.command-trigger kbd,.demo-label{display:none}.heading-row h1{font-size:27px}.hero-art{display:none}.hero-copy{padding:26px}.repo-grid{grid-template-columns:1fr}.repos-toolbar{flex-wrap:wrap}.repo-search{flex-basis:100%}.filter-tabs{gap:10px}.result-counter{display:none}.content{padding:25px 17px 0}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;transition-duration:.001ms!important}}
+
+/* GitFlow multi-account workspace picker */
+.workspace-select { appearance: none; -webkit-appearance: none; width: 100%; min-width: 0; padding: 0; border: 0; outline: none; background: transparent; color: inherit; font: inherit; font-weight: 700; cursor: pointer; text-overflow: ellipsis; }
+.workspace-select option { background: #191a2c; color: #f3f2ff; }
+.workspace-select:focus-visible { outline: 2px solid #a994ff; outline-offset: 3px; border-radius: 3px; }
+.workspace-chip .workspace-text { min-width: 0; flex: 1; }

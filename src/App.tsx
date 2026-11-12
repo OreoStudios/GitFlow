@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Activity, Archive, ArrowDownLeft, ArrowRight, ArrowUpRight, BarChart3,
@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { github, isDesktop, type GitHubUser, type Repo, type RepoDetails } from "./api";
+import { github, isDesktop, type GitHubUser, type Workspace, type Repo, type RepoDetails } from "./api";
 
 type View = "overview" | "repositories" | "activity" | "insights" | "settings";
 type Modal = "connect" | "create" | "delete" | "bulkDelete" | "edit" | "visibility" | "archive" | null;
@@ -134,6 +134,8 @@ export default function App() {
   const [view, setView] = useState<View>("overview");
   const [owner, setOwner] = useState("OreoStudios");
   const [ownerInput, setOwnerInput] = useState("OreoStudios");
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [createOwner, setCreateOwner] = useState("OreoStudios");
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -160,17 +162,23 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const connected = !!user && isDesktop;
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     setLoading(true); setError("");
     try {
       const result = await github.list(owner);
+      if (sequence !== refreshSequence.current) return;
       setRepos(result);
       setSelected(prev => prev.filter(id => result.some(r => r.id === id)));
     } catch (e) {
+      if (sequence !== refreshSequence.current) return;
       setError(errorMessage(e)); setRepos([]);
-    } finally { setLoading(false); }
-  }, [owner]);
+    } finally {
+      if (sequence === refreshSequence.current) setLoading(false);
+    }
+  }, [owner, connected]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
@@ -216,6 +224,7 @@ export default function App() {
   const begin = (next: Modal, repo: Repo | null = null) => {
     setSelectedRepo(repo); setModal(next); setConfirmText(""); setMenuId(null);
     if (repo) { setEditName(repo.name); setEditDesc(repo.description || ""); }
+    if (next === "create") setCreateOwner(owner === "all" ? (user?.login || "OreoStudios") : owner);
   };
 
   async function connect() {
@@ -224,8 +233,14 @@ export default function App() {
     try {
       const u = await github.connect(token);
       setUser(u); setToken(""); setModal(null);
-      notify("success", `Connected to GitHub as @${u.login}`);
-      void refresh();
+      setOwner("all"); setOwnerInput(u.login); setSelected([]);
+      try {
+        setWorkspaces(await github.workspaces());
+      } catch (e) {
+        setWorkspaces([{ login: u.login, avatar_url: u.avatar_url, kind: "personal" }]);
+        notify("info", `Signed in, but workspace discovery is limited: ${errorMessage(e)}`);
+      }
+      notify("success", `Connected as @${u.login} — showing all accessible repositories`);
     } catch (e) { notify("error", errorMessage(e)); }
     finally { setBusy(false); }
   }
@@ -297,7 +312,18 @@ export default function App() {
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="sidebar-brand"><Brandmark/><div><div className="brand-title">Git<span>Flow</span></div><div className="brand-caption">YOUR COMMAND CENTER</div></div></div>
-      <div className="workspace-chip"><span className="workspace-avatar">O</span><span className="workspace-text"><strong>{owner}</strong><small>GitHub workspace</small></span><ChevronDown size={14} /></div>
+      <div className="workspace-chip">
+        <span className="workspace-avatar">{owner === "all" ? <Layers3 size={17}/> : owner.slice(0, 1).toUpperCase()}</span>
+        <span className="workspace-text">
+          <select className="workspace-select" aria-label="Switch GitHub workspace" value={owner} onChange={e => { setOwner(e.target.value); setOwnerInput(e.target.value === "all" ? (user?.login || "OreoStudios") : e.target.value); setSelected([]); }}>
+            {connected && <option value="all">All repositories</option>}
+            {workspaces.map(workspace => <option key={workspace.login} value={workspace.login}>{workspace.login}</option>)}
+            {!workspaces.some(w => w.login.toLowerCase() === owner.toLowerCase()) && owner !== "all" && <option value={owner}>{owner}</option>}
+          </select>
+          <small>{owner === "all" ? "All authorized workspaces" : "GitHub workspace"}</small>
+        </span>
+        <ChevronDown size={14}/>
+      </div>
       <div className="sidebar-scroll">
         {nav.map(section => <div className="nav-group" key={section.group}>
           <div className="nav-section-label">{section.group}</div>
@@ -326,7 +352,7 @@ export default function App() {
           <button className="command-trigger" onClick={() => setPaletteOpen(true)}><Search size={15}/><span>Quick search</span><kbd>Ctrl K</kbd></button>
           <IconButton icon={RefreshCcw} label="Refresh repositories" onClick={() => void refresh()}/>
           <IconButton icon={Bell} label="Notifications" onClick={() => notify("info", "You're all caught up. GitFlow checks GitHub when you refresh.")}/>
-          <div className="topbar-avatar" onClick={() => begin("connect")} title="GitHub account">{user?.avatar_url ? <img src={user.avatar_url} alt=""/> : <Github size={17}/>}</div>
+          <div className="topbar-avatar" onClick={() => connected ? setView("settings") : begin("connect")} title="GitHub account">{user?.avatar_url ? <img src={user.avatar_url} alt=""/> : <Github size={17}/>}</div>
         </div>
       </header>
 
@@ -358,7 +384,7 @@ export default function App() {
               <div className="filter-line"><div className="filter-tabs">{filters.map(f => <button key={f.id} className={filter === f.id ? "active" : ""} onClick={() => { setFilter(f.id); setSelected([]); }}>{f.label}<small>{f.count}</small></button>)}</div><span className="result-counter">Showing {filtered.length} of {repos.length} repositories</span></div>
               {selected.length > 0 && <div className="bulk-bar"><div className="bulk-info"><span className="bulk-count">{selected.length}</span> selected<button className="bulk-clear" onClick={() => setSelected([])}>Clear</button></div><div className="bulk-buttons"><button onClick={() => void doBulkArchive()} disabled={!connected || busy}><Archive size={15}/> Archive selected</button><button className="danger-outline" onClick={() => begin("bulkDelete")} disabled={!connected || busy}><Trash2 size={15}/> Delete selected</button></div></div>}
               {loading && <div className="loading-bar"/>}
-              {!loading && filtered.length === 0 ? <div className="empty-state"><FolderGit2 size={32}/><h3>No repositories found</h3><p>Try a different filter or connect a GitHub account to view private repositories.</p><button className="secondary-btn" onClick={() => { setSearch(""); setFilter("all"); }}>Clear filters</button></div> :
+              {!loading && filtered.length === 0 ? <div className="empty-state"><FolderGit2 size={32}/><h3>No repositories found</h3><p>Try another workspace or filter. If private repositories are missing, check your token’s repository and organization permissions.</p><button className="secondary-btn" onClick={() => { setSearch(""); setFilter("all"); }}>Clear filters</button></div> :
                 <div className={`repo-grid ${display === "list" ? "repo-list" : ""}`}>
                   <AnimatePresence>{filtered.map(repo => <RepoCard key={repo.id} repo={repo} checked={selected.includes(repo.id)} onCheck={id => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id])} onView={viewRepo} onMenu={id => setMenuId(v => v === id ? null : id)} menuOpen={menuId === repo.id} onAction={guard} editable={connected}/>)}</AnimatePresence>
                 </div>}
@@ -380,8 +406,8 @@ export default function App() {
             {view === "settings" && <>
               <div className="heading-row"><div><div className="eyebrow">MAKE IT YOURS</div><h1>Settings<span className="purple-dot">.</span></h1><p className="page-subtitle">Manage the account and workspace used by GitFlow.</p></div></div>
               <div className="settings-stack">
-                <div className="surface-section settings-card"><div className="settings-icon"><Github size={23}/></div><div className="settings-copy"><h3>GitHub connection</h3><p>{connected ? `Signed in as @${user?.login}. Credentials are held in memory until you disconnect or close GitFlow.` : "Connect with a GitHub personal access token to manage private and organization repositories."}</p><div className="setting-status"><span className={`status-led ${connected ? "" : "offline"}`}/>{connected ? "Connected and authenticated" : "Not connected"}</div></div><div className="settings-actions">{connected ? <button className="secondary-btn" onClick={() => void github.disconnect().then(() => { setUser(null); notify("success", "Disconnected from GitHub"); void refresh(); }).catch(e => notify("error", errorMessage(e)))}>Disconnect</button> : <button className="primary-btn" onClick={() => begin("connect")}><KeyRound size={16}/> Connect</button>}</div></div>
-                <div className="surface-section settings-card"><div className="settings-icon"><Layers3 size={23}/></div><div className="settings-copy"><h3>Active workspace</h3><p>Enter an organization or personal GitHub username. GitFlow will load its repositories automatically.</p><div className="owner-form"><input aria-label="GitHub organization or username" value={ownerInput} onChange={e => setOwnerInput(e.target.value)} placeholder="OreoStudios"/><button className="secondary-btn" onClick={() => { if (!/^[A-Za-z0-9_.-]+$/.test(ownerInput.trim())) return notify("error", "Enter a valid GitHub owner name"); setOwner(ownerInput.trim()); setSelected([]); notify("success", `Workspace set to ${ownerInput.trim()}`); }}>Apply workspace</button></div></div></div>
+                <div className="surface-section settings-card"><div className="settings-icon"><Github size={23}/></div><div className="settings-copy"><h3>GitHub connection</h3><p>{connected ? `Signed in as @${user?.login}. Credentials are held in memory until you disconnect or close GitFlow.` : "Connect with a GitHub personal access token to manage private and organization repositories."}</p><div className="setting-status"><span className={`status-led ${connected ? "" : "offline"}`}/>{connected ? "Connected and authenticated" : "Not connected"}</div></div><div className="settings-actions">{connected ? <button className="secondary-btn" onClick={() => void github.disconnect().then(() => { setUser(null); setWorkspaces([]); setOwner("OreoStudios"); setOwnerInput("OreoStudios"); notify("success", "Disconnected from GitHub"); }).catch(e => notify("error", errorMessage(e)))}>Disconnect</button> : <button className="primary-btn" onClick={() => begin("connect")}><KeyRound size={16}/> Connect</button>}</div></div>
+                <div className="surface-section settings-card"><div className="settings-icon"><Layers3 size={23}/></div><div className="settings-copy"><h3>Active workspace</h3><p>Use the sidebar switcher to browse every authorized account, or enter a GitHub organization or username manually.</p><div className="owner-form"><input aria-label="GitHub organization or username" value={ownerInput} onChange={e => setOwnerInput(e.target.value)} placeholder="el211 or OreoStudios"/><button className="secondary-btn" onClick={() => { if (!/^[A-Za-z0-9_.-]+$/.test(ownerInput.trim())) return notify("error", "Enter a valid GitHub owner name"); setOwner(ownerInput.trim()); setSelected([]); notify("success", `Workspace set to ${ownerInput.trim()}`); }}>Apply workspace</button></div></div></div>
                 <div className="surface-section settings-card"><div className="settings-icon"><ShieldCheck size={23}/></div><div className="settings-copy"><h3>Safety and privacy</h3><p>GitFlow never saves your personal access token to localStorage or a file. Delete operations require an exact-name confirmation, and private repositories require appropriate GitHub permissions.</p><div className="settings-mini"><Pill tone="green"><ShieldCheck size={12}/> Token held in memory</Pill><Pill><LockKeyhole size={12}/> Destructive actions protected</Pill></div></div></div>
                 <div className="surface-section settings-card"><div className="settings-icon"><CircleHelp size={23}/></div><div className="settings-copy"><h3>About GitFlow</h3><p>GitFlow v0.1.0 — built with Tauri 2, Rust, React, and TypeScript. Made for fast GitHub workflows by Oreo Studios.</p></div><button className="secondary-btn" onClick={() => void visit("https://github.com/OreoStudios")}>Oreo Studios <ExternalLink size={14}/></button></div>
               </div>
@@ -398,8 +424,14 @@ export default function App() {
     <AnimatePresence>{paletteOpen && <ModalFrame title="Command palette" eyebrow="GO ANYWHERE, INSTANTLY" onClose={() => setPaletteOpen(false)}><div className="palette-items">{nav.flatMap(n => n.items).map(item => <button key={item.id} onClick={() => { setView(item.id); setPaletteOpen(false); }}><item.icon size={17}/>{item.label}<ArrowUpRight size={14}/></button>)}<button onClick={() => { setPaletteOpen(false); begin("create"); }}><Plus size={17}/>Create repository<ArrowUpRight size={14}/></button><button onClick={() => { setPaletteOpen(false); begin("connect"); }}><KeyRound size={17}/>Connect GitHub<ArrowUpRight size={14}/></button></div><p className="modal-hint"><kbd>Ctrl K</kbd> to toggle · <kbd>Esc</kbd> to close</p></ModalFrame>}</AnimatePresence>
 
     <AnimatePresence>{modal && <ModalFrame title={modal === "connect" ? "Connect to GitHub" : modal === "create" ? "Create a repository" : modal === "edit" ? "Edit repository" : modal === "archive" ? (selectedRepo?.archived ? "Unarchive repository" : "Archive repository") : modal === "visibility" ? "Change visibility" : modal === "bulkDelete" ? "Delete selected repositories" : "Delete repository"} eyebrow={modal === "delete" || modal === "bulkDelete" ? "DANGER ZONE" : "GITFLOW WORKSPACE"} onClose={resetModal}>
-      {modal === "connect" && <div className="modal-body"><div className="modal-feature-icon"><KeyRound size={25}/></div><p>Use a GitHub personal access token to connect. Your token stays only in the Rust process memory until GitFlow closes.</p><label className="field-label">PERSONAL ACCESS TOKEN</label><input className="field" type="password" autoComplete="off" placeholder="github_pat_... or ghp_..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => { if (e.key === "Enter") void connect(); }}/><div className="permission-note"><ShieldCheck size={17}/><span>For deletion, a fine-grained token needs repository <b>Administration: Read and write</b>. Restrict access to only the repositories you intend to manage.</span></div><button className="subtle-link" onClick={() => void visit("https://github.com/settings/personal-access-tokens/new")}>Create a fine-grained token <ExternalLink size={14}/></button><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || token.length < 10} onClick={() => void connect()}>{busy ? "Connecting..." : "Connect GitHub"}<ArrowRight size={15}/></button></div></div>}
-      {modal === "create" && <div className="modal-body"><p>Start your next project without leaving GitFlow. The repository will be created under <strong>{owner}</strong>.</p><label className="field-label">REPOSITORY NAME</label><input autoFocus className="field" placeholder="my-awesome-project" value={createName} onChange={e => setCreateName(e.target.value)}/><label className="field-label">DESCRIPTION</label><textarea className="field textarea" placeholder="What's this project about?" value={createDesc} onChange={e => setCreateDesc(e.target.value)}/><div className="privacy-picker"><button className={!createPrivate ? "chosen" : ""} onClick={() => setCreatePrivate(false)}><Globe2 size={19}/><span><b>Public</b><small>Anyone can see this repo</small></span></button><button className={createPrivate ? "chosen" : ""} onClick={() => setCreatePrivate(true)}><LockKeyhole size={19}/><span><b>Private</b><small>Only people with access</small></span></button></div><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || !connected || !/^[A-Za-z0-9_.-]+$/.test(createName)} onClick={() => void mutate(() => github.create({ owner, name: createName, description: createDesc, is_private: createPrivate }), "Repository created successfully")}><Plus size={16}/>{busy ? "Creating..." : "Create repository"}</button></div>{!connected && <p className="modal-hint">Connect your GitHub account before creating a repository.</p>}</div>}
+      {modal === "connect" && <div className="modal-body"><div className="modal-feature-icon"><KeyRound size={25}/></div><p>Use a GitHub personal access token to connect. Your token stays only in the Rust process memory until GitFlow closes.</p><label className="field-label">PERSONAL ACCESS TOKEN</label><input className="field" type="password" autoComplete="off" placeholder="github_pat_... or ghp_..." value={token} onChange={e => setToken(e.target.value)} onKeyDown={e => { if (e.key === "Enter") void connect(); }}/><div className="permission-note"><ShieldCheck size={17}/><span>For deletion, a token needs repository <b>Administration: Read and write</b>. Fine-grained tokens are limited to one resource owner, so private repositories in other organizations need separate authorization.</span></div><button className="subtle-link" onClick={() => void visit("https://github.com/settings/personal-access-tokens/new")}>Create a fine-grained token <ExternalLink size={14}/></button><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || token.length < 10} onClick={() => void connect()}>{busy ? "Connecting..." : "Connect GitHub"}<ArrowRight size={15}/></button></div></div>}
+      {modal === "create" && <div className="modal-body"><p>Start your next project without leaving GitFlow. Choose which GitHub account should own the repository.</p>
+        <label className="field-label">OWNER</label>
+        <select className="field" aria-label="Create repository under" value={createOwner} onChange={e => setCreateOwner(e.target.value)}>
+          {workspaces.map(workspace => <option key={workspace.login} value={workspace.login}>{workspace.login} ({workspace.kind})</option>)}
+          {!workspaces.some(w => w.login === createOwner) && <option value={createOwner}>{createOwner}</option>}
+        </select>
+        <label className="field-label">REPOSITORY NAME</label><input autoFocus className="field" placeholder="my-awesome-project" value={createName} onChange={e => setCreateName(e.target.value)}/><label className="field-label">DESCRIPTION</label><textarea className="field textarea" placeholder="What's this project about?" value={createDesc} onChange={e => setCreateDesc(e.target.value)}/><div className="privacy-picker"><button className={!createPrivate ? "chosen" : ""} onClick={() => setCreatePrivate(false)}><Globe2 size={19}/><span><b>Public</b><small>Anyone can see this repo</small></span></button><button className={createPrivate ? "chosen" : ""} onClick={() => setCreatePrivate(true)}><LockKeyhole size={19}/><span><b>Private</b><small>Only people with access</small></span></button></div><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || !connected || !/^[A-Za-z0-9_.-]+$/.test(createName)} onClick={() => void mutate(() => github.create({ owner: createOwner, name: createName, description: createDesc, is_private: createPrivate }), "Repository created successfully")}><Plus size={16}/>{busy ? "Creating..." : "Create repository"}</button></div>{!connected && <p className="modal-hint">Connect your GitHub account before creating a repository.</p>}</div>}
       {modal === "edit" && selectedRepo && <div className="modal-body"><p>Editing <strong>{selectedRepo.full_name}</strong>. Changes will be sent directly to GitHub.</p><label className="field-label">REPOSITORY NAME</label><input className="field" value={editName} onChange={e => setEditName(e.target.value)}/><label className="field-label">DESCRIPTION</label><textarea className="field textarea" value={editDesc} onChange={e => setEditDesc(e.target.value)}/><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || !/^[A-Za-z0-9_.-]+$/.test(editName)} onClick={() => void mutate(() => github.update(selectedRepo.full_name, { name: editName, description: editDesc }), "Repository updated successfully")}>{busy ? "Saving..." : "Save changes"}</button></div></div>}
       {modal === "archive" && selectedRepo && <div className="modal-body"><div className="modal-feature-icon amber"><Archive size={24}/></div><p>{selectedRepo.archived ? "Unarchiving will allow new changes to this repository again." : "Archiving will make this repository read-only. Its code and history stay on GitHub, and it can be unarchived later."}</p><div className="warning-repo">{selectedRepo.full_name}</div><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy} onClick={() => void mutate(() => github.update(selectedRepo.full_name, { archived: !selectedRepo.archived }), `Repository ${selectedRepo.archived ? "unarchived" : "archived"}`)}>{busy ? "Working..." : selectedRepo.archived ? "Unarchive" : "Archive"}</button></div></div>}
       {modal === "visibility" && selectedRepo && <div className="modal-body"><div className="modal-feature-icon amber">{selectedRepo.private ? <Eye size={24}/> : <EyeOff size={24}/>}</div><p>Change <strong>{selectedRepo.full_name}</strong> from {selectedRepo.private ? "private to public" : "public to private"}.</p><div className="warning-box"><ShieldAlert size={19}/><span>{selectedRepo.private ? "Making a repository public exposes its code and history. Review for secrets and confidential data before proceeding." : "Making a repository private may affect forks, access permissions, and integrations."}</span></div><label className="field-label">TYPE {selectedRepo.private ? "MAKE PUBLIC" : "MAKE PRIVATE"} TO CONFIRM</label><input autoComplete="off" className="field" value={confirmText} onChange={e => setConfirmText(e.target.value)}/><div className="modal-actions"><button className="secondary-btn" onClick={resetModal}>Cancel</button><button className="primary-btn" disabled={busy || confirmText !== (selectedRepo.private ? "MAKE PUBLIC" : "MAKE PRIVATE")} onClick={() => void mutate(() => github.update(selectedRepo.full_name, { is_private: !selectedRepo.private }), "Repository visibility updated")}>Change visibility</button></div></div>}
